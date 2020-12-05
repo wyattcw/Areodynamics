@@ -1,0 +1,539 @@
+import numpy as np
+import json
+import math
+from matplotlib import pyplot as plt
+
+#json read in
+jsonfile = "json_input.json"
+
+#read in json string
+json_string = open(jsonfile).read()
+input_dict = json.loads(json_string)
+planform_type_options = input_dict["wing"]["planform"]["type_options"]
+aspect_ratio = input_dict["wing"]["planform"]["aspect_ratio"]
+taper_ratio = input_dict["wing"]["planform"]["taper_ratio"]
+filename = input_dict["wing"]["planform"]["filename"]
+airfoil_lift_slope = input_dict["wing"]["airfoil_lift_slope"]
+nodes_per_semispan = input_dict["wing"]["nodes_per_semispan"]
+alpha_root_deg = input_dict["condition"]["alpha_root[deg]"]  #Angle of attach at the root
+GivenCL = input_dict["condition"]["CL"]
+planform_type = input_dict["wing"]["planform"]["type"]
+planform = input_dict["view"]["planform"]
+
+###Twist
+distribution = input_dict["wing"]["washout"]["distribution"]
+distribution_options = input_dict["wing"]["washout"]["distribution_options"]
+amount = input_dict["wing"]["washout"]["amount[deg]"]
+amount_options = input_dict["wing"]["washout"]["amount_options"]
+CL_design = input_dict["wing"]["washout"]["CL_design"]
+washout_distribution = input_dict["view"]["washout_distribution"]
+
+#Aileron
+begin_zb = input_dict["wing"]["aileron"]["begin[z/b]"]
+end_zb = input_dict["wing"]["aileron"]["end[z/b]"]
+begin_cf_c = input_dict["wing"]["aileron"]["begin[cf/c]"]
+end_cf_c = input_dict["wing"]["aileron"]["end[cf/c]"]
+hinge_efficiency = input_dict["wing"]["aileron"]["hinge_efficiency"]
+aileron_deflection = input_dict["condition"]["aileron_deflection[deg]"]
+pbar = input_dict["condition"]["pbar"]
+pbar_options = input_dict["condition"]["pbar_options"]
+aileron_distribution = input_dict["view"]["aileron_distribution"]
+CL_hat_distribution = input_dict["view"]["CL_hat_distributions"]
+CL_tilde_distribution = input_dict["view"]["CL_tilde_distributions"]
+
+nodes_per_semispan = 2*nodes_per_semispan-1
+
+theta = np.zeros(nodes_per_semispan)
+for i in range(nodes_per_semispan):
+    theta[i] = (i*math.pi)/(nodes_per_semispan-1)
+#print(theta)
+
+coverb = np.zeros(nodes_per_semispan)
+
+zoverb = np.zeros(nodes_per_semispan)
+for i in range(nodes_per_semispan):
+    zoverb[i] = -math.cos(theta[i]) * 0.5
+#print(zoverb)
+
+if planform_type == "file":
+    with open(filename, "r") as custom_planform: #open
+        custom = []
+        next(custom_planform) #get rid of string
+        for line in custom_planform:
+            custom.append([float(point) for point in line.split()])
+        custom_planform.close()
+    custom = np.array(custom)
+    #print(custom)
+
+    zoverb_custom = np.zeros(len(custom))
+    for i in range(len(custom)):
+        zoverb_custom[i] = custom[i,0]
+
+    coverb_custom = np.zeros(len(custom))
+    for i in range(len(custom)):
+        coverb_custom[i] = custom[i,1]
+    #print(zoverb_custom)
+    #print(coverb_custom)
+    aspect_ratio = 1/(2*np.trapz(coverb_custom,zoverb_custom))#np.average(coverb_custom))
+    print(' RA = ', aspect_ratio,'\n')
+
+    for i in range(nodes_per_semispan):
+        zb = abs(zoverb[i])
+        coverb[i] = np.interp(zb, zoverb_custom, coverb_custom)
+
+
+def Cord(theta_):
+    global aspect_ratio
+    zoverb_ = abs(-math.cos(theta_) * 0.5)
+    if planform_type == "tapered":    #top of page 55
+        return (2*aspect_ratio)/(aspect_ratio*(1+taper_ratio))*(1-(1-taper_ratio)*abs(math.cos(theta_)))
+    elif planform_type == "elliptic":     #Equation 1.8.6 to 7
+        if ((4 * aspect_ratio)/(math.pi*aspect_ratio))*math.sin(theta_) == 0:
+            return 0.001
+        else:
+            return ((4 * aspect_ratio)/(math.pi*aspect_ratio))*math.sin(theta_)
+    elif planform_type == "file":
+        aspect_ratio = 1 / (2 * np.trapz(coverb_custom, zoverb_custom))
+        coverb_ = np.interp(zoverb_, zoverb_custom, coverb_custom)
+        if (coverb_ * aspect_ratio) == 0:
+            return 0.001
+        else:
+            return (coverb_ * aspect_ratio)
+
+def c_z(zoverb_):
+    global aspect_ratio
+    if planform_type == "tapered":    #top of page 55
+        return (2*aspect_ratio)/(aspect_ratio*(1+taper_ratio))*(1-(1-taper_ratio)*abs(2*zoverb_))
+    elif planform_type == "elliptic":     #Equation 1.8.6 to 7
+        if ((4 * aspect_ratio)/(math.pi*aspect_ratio))*math.sqrt(1-(2*zoverb_)**2) == 0:
+            return 0.001
+        else:
+            return ((4 * aspect_ratio)/(math.pi*aspect_ratio))*math.sqrt(1-(2*zoverb_)**2)
+    elif planform_type == "file":
+        aspect_ratio = 1 / (2 * np.trapz(coverb_custom, zoverb_custom))
+        coverb_ = np.interp(zoverb_, zoverb_custom, coverb_custom)
+        if coverb_ * aspect_ratio == 0:
+            return 0.001
+        else:
+            return coverb_ * aspect_ratio
+
+
+#finding root by calculating max. Try other ways.
+root = np.zeros(nodes_per_semispan)
+for i in range(nodes_per_semispan):
+    root[i] = Cord(theta[i])
+#Croot = np.max(root) #axis=0
+#Above is wrong
+Croot = Cord(theta[0])
+
+if planform_type == "elliptic" or planform_type == "tapered":
+    for i in range(nodes_per_semispan):
+        coverb[i] = Cord(theta[i])/aspect_ratio
+    #print(coverb)
+
+C = np.zeros((nodes_per_semispan,nodes_per_semispan))
+
+for j in range(nodes_per_semispan):
+    C[0,j] = (j+1)**2
+    C[nodes_per_semispan-1,j] = ((-1)**(j+2)) * (j+1)**2
+
+for i in range(1, nodes_per_semispan-1):
+    for j in range(nodes_per_semispan):
+        C[i,j] = ((4*aspect_ratio)/(airfoil_lift_slope*Cord(theta[i]))+((j+1)/math.sin(theta[i])))*math.sin((j+1)*theta[i]) #Chord(theta)
+
+#print(C)
+InvC = np.linalg.inv(C)
+
+a = np.zeros(nodes_per_semispan)
+##pg 71
+B1 = np.zeros(nodes_per_semispan)
+for i in range(nodes_per_semispan):
+    B1[i] = 1
+a = InvC.dot(B1)
+#print(a)
+
+#######################################################################################################################
+#Washout
+
+omega = np.zeros(nodes_per_semispan)
+if distribution == "optimum":
+    if planform_type == "tapered":
+        for i in range(nodes_per_semispan):
+            omega[i] = 1-(math.sin(theta[i])/(1-(1-taper_ratio)*abs(math.cos(theta[i])))) #Equation 1.8.43
+    elif planform_type == "elliptic" or planform_type == "file":
+        for i in range(nodes_per_semispan):
+            omega[i] = 1 - ((math.sin(theta[i])) / (Cord(theta[i]) / Croot)) #Equation 1.8.42 Works for all planforms
+
+if distribution == "linear":
+    if planform_type == "tapered":
+        for i in range(nodes_per_semispan):
+            omega[i] = abs(2*zoverb[i])
+    elif planform_type == "elliptic":
+        for i in range(nodes_per_semispan):
+            omega[i] = abs(2*zoverb[i])
+    elif planform_type == "file":
+        for i in range(nodes_per_semispan):
+            omega[i] = abs(2*zoverb[i])
+
+Cfriend = np.zeros(nodes_per_semispan) #PG 69
+for i in range(nodes_per_semispan):
+    Cfriend[i] = 1 - math.sin(i * np.pi / 6)
+
+b = np.zeros(nodes_per_semispan)
+if distribution == "none":
+    b = InvC.dot(Cfriend)
+if distribution == "linear" or distribution == "optimum":
+    b = InvC.dot(omega)
+
+#print(b)
+
+#######################################################################################################################
+#Aileron Distribution
+
+
+cf_c = np.zeros(nodes_per_semispan)
+BeginDist = c_z(begin_zb) * (0.75 - begin_cf_c) #Distance from beggining chord line
+EndDist = c_z(end_zb) * (0.75 - end_cf_c) #Distance from enging of chord line
+slope = (BeginDist - EndDist) / (end_zb - begin_zb)
+yInt = -slope * begin_zb - BeginDist #Yintercept
+for i in range(nodes_per_semispan):
+    DistAil = slope * abs(zoverb[i]) + yInt #Distance from Chord to Aileron
+    cf = 0.75 * Cord(theta[i]) - abs(DistAil)
+    cf_c[i] = cf / Cord(theta[i])
+
+#print(cf_c)
+#print(zoverb)
+thetaF = np.zeros(nodes_per_semispan)
+
+Xtheta = np.zeros(nodes_per_semispan) #pg 75
+for i in range(nodes_per_semispan):
+    if zoverb[i] < -end_zb:
+        Xtheta[i] = 0
+    elif -end_zb < zoverb[i] and zoverb[i] < -begin_zb:
+        if cf_c[i] >= 0:
+            thetaF[i] = math.acos(2 * (cf_c[i]) - 1)
+        epsilonF = (1 - ((thetaF[i] - math.sin(thetaF[i])) / math.pi)) #NEEEDS TO BE IN Z
+        Xtheta[i] = epsilonF * hinge_efficiency
+    elif -begin_zb < zoverb[i] and zoverb[i] < begin_zb:
+        Xtheta[i] = 0
+    elif begin_zb < zoverb[i] and zoverb[i] < end_zb:
+        if cf_c[i] >= 0:
+            thetaF[i] = math.acos(2 * (cf_c[i]) - 1)
+        epsilonF = (1 - ((thetaF[i] - math.sin(thetaF[i])) / math.pi))
+        Xtheta[i] = -epsilonF * hinge_efficiency
+    elif zoverb[i] > end_zb:
+        Xtheta[i] = 0
+
+
+#print(Xtheta)
+cn = InvC.dot(Xtheta)
+
+#print(cn)
+
+
+costheta = np.zeros(nodes_per_semispan)
+for i in range(nodes_per_semispan):
+    costheta[i] = math.cos(theta[i])
+
+dn = InvC.dot(costheta)
+
+#print(dn)
+
+#######################################################################################################################
+
+#Kappa Stuff
+
+if distribution == "linear" or distribution == "optimum":
+    KD = 0
+    for i in range(1, nodes_per_semispan):
+        KD += (i+1)*((a[i]**2)/(a[0]**2))   #Equation 1.8.29
+else:
+    KD = 0
+
+if distribution == "linear" or distribution == "optimum":
+    KL = 0
+    KL += (1 - (1 + math.pi * aspect_ratio / airfoil_lift_slope) * a[0]) / ((1 + math.pi * aspect_ratio / airfoil_lift_slope) * a[0])
+       #Equation 1.8.27
+else:
+    KL = 0
+
+e_s = 1/(1+KD)  #span efficency factor
+
+CLalpha = (math.pi*aspect_ratio*a[0])   #Equation 1.8.26
+
+epsilon_Omega = b[0] / a[0]
+
+if distribution == "linear" or distribution == "optimum":
+    KDL = 0
+    for i in range(1, nodes_per_semispan):
+        KDL += (i + 1) * ((a[i]) / (a[0])) * ((b[i] / b[0]) - (a[i] / a[0]))
+    KDL *= 2 * (b[0] / a[0])
+else:
+    KDL = 0
+
+#if distribution == "linear" or distribution == "optimum":
+KDOmega = 0
+for i in range(1, nodes_per_semispan):
+    KDOmega += (i + 1) * ((b[i] / b[0]) - (a[i] / a[0])) ** 2
+KDOmega *= (b[0] / a[0]) ** 2
+#else:
+    #KDOmega = 0
+
+if distribution == "linear" or distribution == "optimum":
+    KDo = KD - ((KDL ** 2) / (4 * KDOmega))
+else:
+    KDo = 0
+
+CLda = -((math.pi * aspect_ratio) / 4) * cn[1]
+
+CLp = -((math.pi * aspect_ratio) / 4) * dn[1]
+
+#######################################################################################################################
+
+if amount == "optimum":
+
+    oomegaOpt = (KDL * CL_design)/(2*KDOmega*CLalpha) #1.8.37  Works for all washout acourding to pg 64
+    print(' Omega[deg] = ',oomegaOpt*180/math.pi)
+
+else:
+    print(' Given Omega[deg] = ', amount)
+    oomegaOpt = amount * math.pi / 180  #BIG OMEGA
+
+#######################################################################################################################
+
+# Alpha root deg
+alpha_root = 0
+if alpha_root_deg == "CL":
+    alpha_root = (GivenCL / CLalpha) + epsilon_Omega * oomegaOpt # Equation 1.8.24
+    print('\n','alpha[deg] = ',alpha_root*180/math.pi,'\n')
+
+else:
+    print('\n','Given alpha[deg] = ',alpha_root_deg,'\n')
+    alpha_root = alpha_root_deg * math.pi / 180
+
+#######################################################################################################################
+#Kappa results
+print(' KL = ',KL,'\n','CLalpha = ',CLalpha,'\n','epsilon_Omega= ',epsilon_Omega,'\n','KD = ',KD,'\n','KDL = ',KDL,'\n','KDOmega = ',KDOmega,'\n', 'CLda = ', CLda, '\n', 'CLpbar = ', CLp)
+
+
+CLEqu19 = CLalpha * (alpha_root - (epsilon_Omega * oomegaOpt))  # Equation 1.8.24
+
+
+CDiEqu15 = (CLEqu19 ** 2 * (1 + KD) - KDL * CLEqu19 * CLalpha * (oomegaOpt) + KDOmega * (
+            CLalpha * (oomegaOpt)) ** 2) / (math.pi * aspect_ratio)
+
+print('\n','CL (Equ 19) = ', CLEqu19,'\n', 'CDi (Equ 15) = ', CDiEqu15)
+
+#######################################################################################################################
+
+CLda = -((math.pi * aspect_ratio) / 4) * cn[1]
+
+CLp = -((math.pi * aspect_ratio) / 4) * dn[1]
+
+if pbar == "steady":
+
+    ppbar= -(cn[1] / dn[1]) * aileron_deflection * (math.pi / 180) #-(CLda/CLp)*aileron_deflection*(math.pi/180) #pg82
+
+else:
+    ppbar = pbar
+
+
+An = np.zeros(nodes_per_semispan)
+for i in range(nodes_per_semispan):
+    An[i] = a[i] * alpha_root - b[i] * oomegaOpt + cn[i] * aileron_deflection * (math.pi / 180) + dn[i] * ppbar
+#print(An)
+
+# CL from Kappa results. Equation 5
+CLkappa = math.pi * aspect_ratio * An[0]
+
+
+CDiEqu6 = 0
+for i in range(nodes_per_semispan):
+    CDiEqu6 += (i + 1) * An[i] ** 2 - (math.pi * aspect_ratio * ppbar * An[1] / 2)
+CDiEqu6 *= math.pi * aspect_ratio
+
+CsquiglyL = -((math.pi*aspect_ratio)/4)*An[1] #Lifting Line Summary Equation 7
+
+Cnstart = 0
+Cn = 0
+for i in range(1,nodes_per_semispan):
+    Cnstart += (2*(i+1)-1)*An[i-1]*An[i]
+Cn = (((math.pi*aspect_ratio)/4)*Cnstart)-(((math.pi * aspect_ratio * ppbar) / 8) * (An[0] + An[2])) #Lifting Line Summary Equation 8
+
+#if aileron_distribution:
+print('\n','Pbar = ', ppbar, '\n','CL (Equ 5) = ', CLkappa, '\n', 'CDi (Equ 6) = ', CDiEqu6, '\n', 'CsquiglyL = ', CsquiglyL, '\n', 'Cn = ', Cn, '\n', 'Pbar_steady = ', ppbar,'\n','Omega Opt[deg] = ', oomegaOpt*180/math.pi)
+#######################################################################################################################
+
+
+#Writing the C to text file
+with open("SolutionW3.txt", 'w') as output_file:
+    output_file.write("C_Matrix:\n")
+    #C Matrix
+    for i in range(nodes_per_semispan):
+        for j in range(nodes_per_semispan):
+            out_string = "{:>20.12f}".format(C[i,j])
+            output_file.write(out_string)
+        output_file.write("\n")
+    #Inverse C Matrix
+    output_file.write("InvC_Matrix:\n")
+    for i in range(nodes_per_semispan):
+        for j in range(nodes_per_semispan):
+            out_string = "{:>20.12f}".format(InvC[i,j])
+            output_file.write(out_string)
+        output_file.write("\n")
+    #A Matrix
+    output_file.write("an_Matrix:\n")
+    for i in range(nodes_per_semispan):
+        out_string = "{:>20.12f}".format(a[i])
+        output_file.write(out_string)
+    output_file.write("\n")
+    #B Matrix
+    output_file.write("bn_Matrix:\n")
+    for i in range(nodes_per_semispan):
+        out_string = "{:>20.12f}".format(b[i])
+        output_file.write(out_string)
+    output_file.write("\n")
+    #C Matrix
+    output_file.write("cn_Matrix:\n")
+    for i in range(nodes_per_semispan):
+        out_string = "{:>20.12f}".format(cn[i])
+        output_file.write(out_string)
+    output_file.write("\n")
+    #D Matrix
+    output_file.write("dn_Matrix:\n")
+    for i in range(nodes_per_semispan):
+        out_string = "{:>20.12f}".format(dn[i])
+        output_file.write(out_string)
+    output_file.write("\n")
+
+#######################################################################################################################
+
+#PLOTTING
+if planform:
+    plt.figure()
+    #planform
+    plt.plot([-0.5,0.5],[0.0,0.0],color='red')
+
+    for i in range(nodes_per_semispan):
+        plt.plot([zoverb[i],zoverb[i]],[0.25*coverb[i],-0.75*coverb[i]],color='green')
+
+    plt.plot(zoverb, coverb*0.25,color='black')
+    plt.plot(zoverb, -coverb*0.75,color='black')
+
+    #AILERON
+    Topleft = (-.75*c_z(begin_zb))/aspect_ratio
+    Bottomleft = (- .75*c_z(begin_zb)+begin_cf_c)/aspect_ratio
+    TopRight = (-.75*c_z(end_zb))/aspect_ratio
+    BottomRight = (-.75*c_z(end_zb)+end_cf_c)/aspect_ratio
+    #Hinge
+    plt.plot([begin_zb,end_zb],[Bottomleft,BottomRight],color = 'black')
+    plt.plot([-begin_zb, -end_zb], [Bottomleft,BottomRight], color='black')
+    #Vertical Ail
+    plt.plot([begin_zb,begin_zb],[Bottomleft,Topleft],color = 'black')
+    plt.plot([end_zb,end_zb],[BottomRight,TopRight],color = 'black')
+    plt.plot([-begin_zb,-begin_zb],[Bottomleft,Topleft],color = 'black')
+    plt.plot([-end_zb,-end_zb],[BottomRight,TopRight],color = 'black')
+
+    plt.gca().set_aspect('equal', adjustable='box')
+    plt.xlabel("z/b")
+    plt.ylabel("c/b")
+    plt.title("Planform")
+
+#######################################################################################################################
+
+if washout_distribution:
+    plt.figure()
+    plt.plot(zoverb, omega, color='blue')
+    plt.xlabel("z/b")
+    plt.ylabel("omega")
+    plt.title("Washout Distribution")
+
+#######################################################################################################################
+
+if aileron_distribution:
+    plt.figure()
+    plt.plot(zoverb, Xtheta, color='blue')
+    plt.xlabel("z/b")
+    plt.ylabel("Chi")
+    plt.title("Aileron Distribution")
+
+#######################################################################################################################
+
+CL_hat_planform = np.zeros(nodes_per_semispan)
+for i in range(nodes_per_semispan):
+    for j in range(nodes_per_semispan):
+        CL_hat_planform[i] += a[j] * math.sin((j+1)*theta[i])
+    CL_hat_planform[i] *= 4 * alpha_root
+
+CL_hat_washout = np.zeros(nodes_per_semispan)
+for i in range(nodes_per_semispan):
+    for j in range(nodes_per_semispan):
+        CL_hat_washout[i] += b[j] * math.sin((j + 1) * theta[i])
+    CL_hat_washout[i] *= -4 * oomegaOpt
+
+CL_hat_aileron = np.zeros(nodes_per_semispan)
+for i in range(nodes_per_semispan):
+    for j in range(nodes_per_semispan):
+        CL_hat_aileron[i] += cn[j] * math.sin((j + 1) * theta[i])
+    CL_hat_aileron[i] *= 4 * aileron_deflection * (math.pi / 180)
+
+CL_hat_roll = np.zeros(nodes_per_semispan)
+for i in range(nodes_per_semispan):
+    for j in range(nodes_per_semispan):
+        CL_hat_roll[i] += dn[j] * math.sin((j + 1) * theta[i])
+    CL_hat_roll[i] *= 4 * ppbar
+
+CL_hat = np.zeros(nodes_per_semispan)
+for i in range(nodes_per_semispan):
+    CL_hat[i] += CL_hat_planform[i] + CL_hat_washout[i] + CL_hat_aileron[i] + CL_hat_roll[i]
+
+if CL_hat_distribution:
+    plt.figure()
+    plt.plot(zoverb, CL_hat_planform, color='blue', label = "Planform")
+    plt.plot(zoverb, CL_hat_washout, color='green', label = "Washout")
+    plt.plot(zoverb, CL_hat_aileron, color='red', label = "Aileron")
+    plt.plot(zoverb, CL_hat_roll, color='purple', label = "Roll")
+    plt.plot(zoverb, CL_hat, color='black', label = "Total CL Hat")
+    plt.xlabel("z/b")
+    plt.ylabel("CL Hat")
+    plt.title("CL Hat Distribution")
+    plt.legend()
+
+
+#######################################################################################################################
+
+CL_tilde_planform = np.zeros(nodes_per_semispan)
+for i in range(nodes_per_semispan):
+    CL_tilde_planform[i] = CL_hat_planform[i] * (aspect_ratio/Cord(theta[i]))
+
+CL_tilde_washout = np.zeros(nodes_per_semispan)
+for i in range(nodes_per_semispan):
+    CL_tilde_washout[i] = CL_hat_washout[i] * (aspect_ratio/Cord(theta[i]))
+
+CL_tilde_aileron = np.zeros(nodes_per_semispan)
+for i in range(nodes_per_semispan):
+    CL_tilde_aileron[i] = CL_hat_aileron[i] * (aspect_ratio/Cord(theta[i]))
+
+CL_tilde_roll = np.zeros(nodes_per_semispan)
+for i in range(nodes_per_semispan):
+    CL_tilde_roll[i] = CL_hat_roll[i] * (aspect_ratio/Cord(theta[i]))
+
+CL_tilde = np.zeros(nodes_per_semispan)
+for i in range(nodes_per_semispan):
+    CL_tilde[i] = CL_tilde_planform[i] + CL_tilde_washout[i] + CL_tilde_aileron[i] + CL_hat_roll[i]
+
+if CL_tilde_distribution:
+    plt.figure()
+    plt.plot(zoverb, CL_tilde_planform, color='blue', label = "Planform")
+    plt.plot(zoverb, CL_tilde_washout, color='green', label = "Washout")
+    plt.plot(zoverb, CL_tilde_aileron, color='red', label = "Aileron")
+    plt.plot(zoverb, CL_tilde_roll, color='purple', label = "Roll")
+    plt.plot(zoverb, CL_tilde, color='black', label = "Total")
+    plt.xlabel("z/b")
+    plt.ylabel("CL Tilde")
+    plt.title("CL Tilde Distribution")
+    plt.legend()
+
+plt.show()
+
+#######################################################################################################################
